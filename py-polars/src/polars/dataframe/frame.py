@@ -4407,11 +4407,15 @@ class DataFrame:
 
             * "postgresql://user:pass@server:port/database"
             * "sqlite:////path/to/database.db"
-        if_table_exists : {'append', 'replace', 'fail'}
+        if_table_exists : {'append', 'create_append', 'replace', 'fail'}
             The insert mode:
 
             * 'replace' will create a new database table, overwriting an existing one.
-            * 'append' will append to an existing table.
+            * 'append' will append to an existing table (the table must already exist).
+            * 'create_append' will create the table if it does not exist, or append to
+              it if it does. Only supported for the ADBC engine with
+              adbc-driver-manager >= 0.7; raises ``ModuleUpgradeRequiredError``
+              otherwise.
             * 'fail' will fail if table already exists.
         engine : {'sqlalchemy', 'adbc'}
             Select the engine to use for writing frame data; only necessary when
@@ -4520,11 +4524,19 @@ class DataFrame:
                     raise ModuleUpgradeRequiredError(msg)
                 mode = "replace"
             elif if_table_exists == "append":
-                mode = "append" if driver_manager_version < (0, 7) else "create_append"
+                mode = "append"
+            elif if_table_exists == "create_append":
+                if driver_manager_version < (0, 7):
+                    msg = (
+                        "`if_table_exists = 'create_append'` requires ADBC version >= 0.7, "
+                        f"found {driver_manager_str_version}"
+                    )
+                    raise ModuleUpgradeRequiredError(msg)
+                mode = "create_append"
             else:
                 msg = (
                     f"unexpected value for `if_table_exists`: {if_table_exists!r}"
-                    f"\n\nChoose one of {{'fail', 'replace', 'append'}}"
+                    f"\n\nChoose one of {{'fail', 'replace', 'append', 'create_append'}}"
                 )
                 raise ValueError(msg)
 
@@ -4687,13 +4699,17 @@ class DataFrame:
 
             # ensure conversion to pandas uses the pyarrow extension array option
             # so that we can make use of the sql/db export *without* copying data
+            # pandas does not have a 'create_append' mode; map it to 'append'
+            pandas_if_exists = (
+                "append" if if_table_exists == "create_append" else if_table_exists
+            )
             res: int | None = self.to_pandas(
                 use_pyarrow_extension_array=True,
             ).to_sql(
                 name=unpacked_table_name,
                 schema=db_schema,
                 con=sa_object,
-                if_exists=if_table_exists,
+                if_exists=pandas_if_exists,
                 index=False,
                 **(engine_options or {}),
             )

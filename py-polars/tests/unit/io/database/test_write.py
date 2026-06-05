@@ -158,10 +158,10 @@ class TestWriteDatabase:
         if hasattr(conn, "close"):
             conn.close()
 
-    def test_write_database_append_creates_missing_table(
+    def test_write_database_create_append(
         self, engine: DbWriteEngine, uri_connection: bool, tmp_path: Path
     ) -> None:
-        """`append` should create table when one does not already exist."""
+        """`create_append` creates the table when absent, and appends when it exists."""
         if engine == "adbc":
             adbc_driver_manager = pytest.importorskip("adbc_driver_manager")
             if parse_version(getattr(adbc_driver_manager, "__version__", "0.0")) < (
@@ -170,25 +170,21 @@ class TestWriteDatabase:
             ):
                 pytest.skip("adbc-driver-manager < 0.7.0 has no create_append mode")
 
-        df = pl.DataFrame(
-            {
-                "id": [1, 2, 3],
-                "name": ["a", "b", "c"],
-            }
-        )
+        df = pl.DataFrame({"id": [1, 2, 3], "name": ["a", "b", "c"]})
         tmp_path.mkdir(exist_ok=True)
         test_db_uri = (
-            f"sqlite:///{tmp_path}/test_append_create_{int(uri_connection)}.db"
+            f"sqlite:///{tmp_path}/test_create_append_{int(uri_connection)}.db"
         )
 
-        table_name = "test_append_create"
+        table_name = "test_create_append"
         conn = self._get_connection(test_db_uri, engine, uri_connection)
 
+        # First write: table does not exist — should be created
         assert (
             df.write_database(
                 table_name=table_name,
                 connection=conn,
-                if_table_exists="append",
+                if_table_exists="create_append",
                 engine=engine,
             )
             == 3
@@ -198,6 +194,52 @@ class TestWriteDatabase:
             connection=create_engine(test_db_uri),
         )
         assert_frame_equal(result, df)
+
+        # Second write: table already exists — should append
+        assert (
+            df.write_database(
+                table_name=table_name,
+                connection=conn,
+                if_table_exists="create_append",
+                engine=engine,
+            )
+            == 3
+        )
+        result = pl.read_database(
+            query=f"SELECT * FROM {table_name}",
+            connection=create_engine(test_db_uri),
+        )
+        assert_frame_equal(result, pl.concat([df, df]))
+
+        if hasattr(conn, "close"):
+            conn.close()
+
+    def test_write_database_append_requires_existing_table(
+        self, engine: DbWriteEngine, uri_connection: bool, tmp_path: Path
+    ) -> None:
+        """`append` fails when the table does not exist (regression #27886)."""
+        # SQLAlchemy's pandas to_sql always creates the table in append mode;
+        # this distinction only applies to the ADBC engine.
+        if engine != "adbc":
+            pytest.skip(
+                "append-requires-existing-table only applies to the ADBC engine"
+            )
+
+        df = pl.DataFrame({"id": [1, 2, 3], "name": ["a", "b", "c"]})
+        tmp_path.mkdir(exist_ok=True)
+        test_db_uri = (
+            f"sqlite:///{tmp_path}/test_append_missing_{int(uri_connection)}.db"
+        )
+
+        conn = self._get_connection(test_db_uri, engine, uri_connection)
+
+        with pytest.raises(Exception):  # noqa: B017
+            df.write_database(
+                table_name="does_not_exist",
+                connection=conn,
+                if_table_exists="append",
+                engine=engine,
+            )
 
         if hasattr(conn, "close"):
             conn.close()
@@ -379,6 +421,35 @@ def test_write_database_sa_commit(tmp_path: str, pass_connection: bool) -> None:
         )
 
     assert_frame_equal(result, df)
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="adbc not available on Windows")
+def test_write_database_adbc_create_append_old_version_error() -> None:
+    """Confirm that `create_append` raises on adbc-driver-manager < 0.7.0."""
+    from unittest.mock import patch
+
+    from polars.exceptions import ModuleUpgradeRequiredError
+
+    df = pl.DataFrame({"colx": [1, 2, 3]})
+    conn = _open_adbc_connection("sqlite:///:memory:")
+
+    with (
+        patch(
+            "adbc_driver_manager.__version__",
+            "0.6.0",
+        ),
+        pytest.raises(
+            ModuleUpgradeRequiredError, match=r"requires ADBC version >= 0\.7"
+        ),
+    ):
+        df.write_database(
+            "test_old_version",
+            connection=conn,
+            if_table_exists="create_append",
+        )
+
+    if hasattr(conn, "close"):
+        conn.close()
 
 
 @pytest.mark.skipif(sys.platform == "win32", reason="adbc not available on Windows")
